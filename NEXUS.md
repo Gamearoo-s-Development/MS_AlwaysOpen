@@ -73,6 +73,12 @@ Options:
 
 ## Changelog
 
+### 1.0.1
+
+- Reworked overnight progression to use the game day routine patch path, preventing shift/day desync.
+- Preserved normal day lifecycle signaling on automatic new-day handoff.
+- Fixed cashier transient state carry-over that could break late-shift cashiers after the first day.
+
 ### 1.0.0
 
 - Initial release.

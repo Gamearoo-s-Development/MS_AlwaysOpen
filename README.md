@@ -74,6 +74,16 @@ Behavior in modded modes (`AlwaysOpen24x7=true` or `UseCustomHours=true`):
 	- `OpenCloseLabel` (forces/stabilizes open state in 24/7 mode)
 	- `TimeManager.CanSpawnCustomer()`
 	- `TimeManager.CanSpawnWanderer()`
+	- `TimeManager.DayRoutine()` (extended full-day cycle in modded modes)
 	- `TooltipUI.ShowTooltip()` (`end_day_tooltip` suppression)
 	- `TimeManager.ShowNextDayUI()` (auto next day)
+	- `Cashier.DeactivateInstant()` (resets transient shift flags)
+
+## Changelog
+
+### 1.0.1
+
+- Reworked overnight progression to run through `TimeManager.DayRoutine()` instead of a parallel `Update()` tick.
+- Preserved day lifecycle events during auto day rollover to keep employee shifts and customer systems in sync.
+- Fixed cashier transient state carry-over that could break late-shift cashiers after day one.
 

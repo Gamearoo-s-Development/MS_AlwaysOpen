@@ -1,3 +1,5 @@
+using System;
+using System.Collections;
 using BepInEx;
 using BepInEx.Configuration;
 using HarmonyLib;
@@ -10,7 +12,7 @@ public sealed class AlwaysOpenPlugin : BaseUnityPlugin
 {
     public const string PluginGuid = "com.gamearoo.megastore.alwaysopen";
     public const string PluginName = "MS Always Open";
-    public const string PluginVersion = "1.0.0";
+    public const string PluginVersion = "1.0.1";
 
     private static ConfigEntry<bool> alwaysOpen;
     private static ConfigEntry<bool> useCustomHours;
@@ -18,10 +20,6 @@ public sealed class AlwaysOpenPlugin : BaseUnityPlugin
     private static ConfigEntry<int> closeHour;
 
     private Harmony harmony;
-    private float overnightAccumulator;
-
-    private const float QuarterTickSeconds = 0.066f;
-    private const int FullDayMinutesFromSixAm = 1440;
 
     private void Awake()
     {
@@ -39,53 +37,6 @@ public sealed class AlwaysOpenPlugin : BaseUnityPlugin
     private void OnDestroy()
     {
         harmony?.UnpatchSelf();
-    }
-
-    private void Update()
-    {
-        if (!ShouldSuppressEndDayTooltip())
-        {
-            return;
-        }
-
-        var timeManager = SingletonBehaviour<TimeManager>.Instance;
-        if (timeManager == null)
-        {
-            return;
-        }
-
-        if (timeManager.CurrentMin < 960)
-        {
-            return;
-        }
-
-        overnightAccumulator += Time.unscaledDeltaTime;
-
-        while (overnightAccumulator >= QuarterTickSeconds)
-        {
-            overnightAccumulator -= QuarterTickSeconds;
-
-            var currentQuarters = (int)AccessTools.Field(typeof(TimeManager), "quarters").GetValue(timeManager);
-            currentQuarters++;
-            AccessTools.Field(typeof(TimeManager), "quarters").SetValue(timeManager, currentQuarters);
-            AccessTools.Field(typeof(TimeManager), "mins").SetValue(timeManager, (float)currentQuarters / 10f);
-
-            AccessTools.Method(typeof(TimeManager), "RepaintSun").Invoke(timeManager, null);
-
-            if (currentQuarters % 10 == 0)
-            {
-                GenericDataSerializer.SaveInt("CurrentHour", timeManager.CurrentMin);
-                AccessTools.Method(typeof(TimeManager), "RepaintHourText").Invoke(timeManager, null);
-                TimeManager.OnMinPassed?.Invoke();
-
-                if (timeManager.CurrentMin >= FullDayMinutesFromSixAm)
-                {
-                    overnightAccumulator = 0f;
-                    timeManager.StartTheNewDay();
-                    break;
-                }
-            }
-        }
     }
 
     internal static bool ShouldForceAlwaysOpen()
@@ -131,6 +82,11 @@ public sealed class AlwaysOpenPlugin : BaseUnityPlugin
     internal static bool ShouldSuppressEndDayTooltip()
     {
         return (alwaysOpen != null && alwaysOpen.Value) || (useCustomHours != null && useCustomHours.Value);
+    }
+
+    internal static bool ShouldUseExtendedDayCycle()
+    {
+        return ShouldSuppressEndDayTooltip();
     }
 }
 
@@ -238,5 +194,114 @@ internal static class TimeManagerGetHourTextPatch
         var minute = minutesOfDay % 60;
         __result = string.Format("{0:D2}:{1:D2}", hour, minute);
         return false;
+    }
+}
+
+[HarmonyPatch(typeof(TimeManager), "DayRoutine")]
+internal static class TimeManagerDayRoutinePatch
+{
+    private const int FullDayQuartersFromSixAm = 14400;
+
+    private static readonly System.Reflection.FieldInfo Point1MinWaiterField = AccessTools.Field(typeof(TimeManager), "point1MinWaiter");
+    private static readonly System.Reflection.FieldInfo MinsField = AccessTools.Field(typeof(TimeManager), "mins");
+    private static readonly System.Reflection.FieldInfo QuartersField = AccessTools.Field(typeof(TimeManager), "quarters");
+    private static readonly System.Reflection.MethodInfo RepaintSunMethod = AccessTools.Method(typeof(TimeManager), "RepaintSun");
+    private static readonly System.Reflection.MethodInfo RepaintHourTextMethod = AccessTools.Method(typeof(TimeManager), "RepaintHourText");
+    private static readonly Type DataSerializerType = AccessTools.TypeByName("ToolBox.Serialization.DataSerializer") ?? AccessTools.TypeByName("DataSerializer");
+    private static readonly System.Reflection.MethodInfo DataSerializerSaveFileMethod = DataSerializerType == null ? null : AccessTools.Method(DataSerializerType, "SaveFile");
+
+    private static bool Prefix(TimeManager __instance, ref IEnumerator __result)
+    {
+        if (!AlwaysOpenPlugin.ShouldUseExtendedDayCycle())
+        {
+            return true;
+        }
+
+        __result = DayRoutineExtended(__instance);
+        return false;
+    }
+
+    private static IEnumerator DayRoutineExtended(TimeManager timeManager)
+    {
+        var waiter = Point1MinWaiterField.GetValue(timeManager);
+
+        while (true)
+        {
+            var mins = (float)MinsField.GetValue(timeManager);
+            var openCloseLabel = SingletonBehaviour<OpenCloseLabel>.Instance;
+
+            if (Mathf.Approximately(mins, 0f) && openCloseLabel != null && !openCloseLabel.IsOpen)
+            {
+                yield return waiter;
+                continue;
+            }
+
+            if (mins < 1440f)
+            {
+                var quarters = (int)QuartersField.GetValue(timeManager);
+                mins = (float)quarters / 10f;
+                MinsField.SetValue(timeManager, mins);
+                quarters++;
+                QuartersField.SetValue(timeManager, quarters);
+
+                GenericDataSerializer.SaveInt("CurrentHour", timeManager.CurrentMin);
+                RepaintSunMethod.Invoke(timeManager, null);
+
+                if (quarters % 10 == 0)
+                {
+                    if (Mathf.Approximately(mins, 360f))
+                    {
+                        EventManager.NotifyEvent(UIEvents.OPEN_INCOME_OFFER);
+                    }
+
+                    if (quarters == 7500)
+                    {
+                        SingletonBehaviour<AudioManager>.Instance.OnSunDowned();
+                    }
+
+                    if (quarters == 8400)
+                    {
+                        EventManager.NotifyEvent(GameEvents.SPAWN_TIME_OVER);
+                    }
+
+                    if (quarters == 4800)
+                    {
+                        EventManager.NotifyEvent(GameEvents.EARLY_SHIFT_OVER);
+                        EventManager.NotifyEvent(GameEvents.LATE_SHIFT_STARTED);
+                    }
+
+                    RepaintHourTextMethod.Invoke(timeManager, null);
+                    TimeManager.OnMinPassed?.Invoke();
+
+                    if (quarters >= FullDayQuartersFromSixAm)
+                    {
+                        EventManager.NotifyEvent(GameEvents.DAY_ENDED);
+                        DataSerializerSaveFileMethod?.Invoke(null, null);
+                        timeManager.StartTheNewDay();
+                    }
+                }
+            }
+
+            yield return waiter;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(Cashier), nameof(Cashier.DeactivateInstant))]
+internal static class CashierDeactivateInstantPatch
+{
+    private static readonly System.Reflection.FieldInfo BusyAnimatingField = AccessTools.Field(typeof(Cashier), "busyAnimating");
+    private static readonly System.Reflection.FieldInfo ServingField = AccessTools.Field(typeof(Cashier), "serving");
+    private static readonly System.Reflection.FieldInfo QuitWhenReadyField = AccessTools.Field(typeof(Cashier), "quitWhenReady");
+    private static readonly System.Reflection.FieldInfo SwitchWhenReadyField = AccessTools.Field(typeof(Cashier), "switchWhenReady");
+    private static readonly System.Reflection.FieldInfo NewCheckoutDeskIdField = AccessTools.Field(typeof(Cashier), "newCheckoutDeskID");
+
+    private static void Postfix(Cashier __instance)
+    {
+        BusyAnimatingField.SetValue(__instance, false);
+        ServingField.SetValue(__instance, false);
+        QuitWhenReadyField.SetValue(__instance, false);
+        SwitchWhenReadyField.SetValue(__instance, false);
+        NewCheckoutDeskIdField.SetValue(__instance, -1);
     }
 }
